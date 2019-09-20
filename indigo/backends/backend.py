@@ -350,6 +350,7 @@ class Backend(object):
         s = np.ones(n, order='F', dtype=dtype) / np.sqrt(n)
         S = self.Diag(s, name='scale')
         F = self.UnscaledFFT(shape, dtype, **kwargs)
+        return S,F # FIXME
         return S*F
 
     def FFTc(self, ft_shape, dtype, normalize=True, **kwargs):
@@ -363,9 +364,11 @@ class Backend(object):
         mod = np.exp(1j * 2.0 * np.pi * mod).astype(dtype)
         M = self.Diag(mod, name='mod')
         if normalize:
-            F = self.FFT(ft_shape, dtype=dtype, **kwargs)
+            U, F = self.FFT(ft_shape, dtype=dtype, **kwargs)
+            return M,U,F,M # FIXME
         else:
             F = self.UnscaledFFT(ft_shape, dtype=dtype, **kwargs)
+            return M,F,M # FIXME
         return M*F*M
 
     def Zpad(self, M, N, mode='center', dtype=np.dtype('complex64'), **kwargs):
@@ -403,7 +406,7 @@ class Backend(object):
     def NUFFT(self, M, N, coord, width=3, n=128, oversamp=None, dtype=np.dtype('complex64'), **kwargs):
         assert len(M) == 3
         assert len(N) == 3
-        assert M[1:] == coord.shape[1:]
+        assert M[1:] == coord.shape[1:], (M, coord.shape)
 
         # target 448 x 270 x 640
         #   448 x 270 x 640   mkl-batch: 170.83 ms, 237.51 gflop/s  back-to-back: 121.76 ms, 333.23 gflop/s
@@ -430,7 +433,7 @@ class Backend(object):
         oN = tuple(int(on) for on in oN)
 
         Z = self.Zpad(oN, N, dtype=dtype, name='zpad')
-        F = self.FFTc(oN, dtype=dtype, name='fft')
+        M1,U,F,M2 = self.FFTc(oN, dtype=dtype, name='fft')
 
         beta = np.pi * np.sqrt(((width * 2. / omin) * (omin- 0.5)) ** 2 - 0.8)
         kb = signal.kaiser(2 * n + 1, beta)[n:]
@@ -439,6 +442,7 @@ class Backend(object):
         r = rolloff3(omin, width, beta, N)
         R = self.Diag(r, name='apod')
 
+        return G,M1,U,F,M2,Z,R # FIXME
         return G*F*Z*R
 
     def Convolution(self, kernel, normalize=True, name='noname'):
@@ -688,48 +692,45 @@ class Backend(object):
             log.info("cg reached maxiter")
         x.copy_to(x_h)
 
-    def apgd(self, gradf, proxg, alpha, x_h, maxiter=100, team=None):
-        '''Accelerated proximal gradient descent.
-        Solves for min_x f(x) + g(x)
+    def power(self, A, x_h, maxiter=10):
+        x = self.copy_array(x_h)
+        for it in range(maxiter):
+            A.eval(x, x)
+            s = np.sqrt(self.norm2(x))
+            self.scale(x, 1/s)
+        return s, x
 
-        Parameters
-        ----------
-        gradf : Gradient of f
-        proxg : Proximal of g
-        alpha : Step size
-        x0 : 1D array, initial solution
-        maxiter : int, optional
-        '''
-        x_k = self.copy_array(x_h)
-        y_k = x_k.copy()
-        y_k1 = x_k.copy()
-        x_k1 = x_k.copy()
+    def apgd(self, gradf, proxg, alpha, x_h, maxiter=100, disp=None):
 
-        gf = x_k.copy()
+        gfx = self.zeros_like(x_h)
+        x = self.copy_array(x_h)
+        z = x.copy()
+        t = 1.0
 
-        t_k = 1
-
-        for it in range(1,maxiter+1):
+        for it in range(maxiter):
             profile.extra['it'] = it
-
             with profile("iter"):
-                gradf(gf, y_k)
-                self.axpby(1, x_k, -alpha, gf)
 
-                proxg(x_k, alpha)
+                    x, z = z, x
+                    s = t
 
-                t_k1 = (1.0 + np.sqrt(1.0 + 4.0 * t_k**2)) / 2.0
+                    with profile("linop"):
+                        gradf(gfx, x)
 
-                t_ratio = (t_k - 1) / t_k1
-                self.axpby(0, y_k1, 1+t_ratio, x_k)
-                self.axpby(1, y_k1,  -t_ratio, x_k1)
+                    self.axpby(1, x, -alpha, gfx)  # x = x - alpha * gfx
 
-                x_k1.copy(x_k)
-                y_k.copy(y_k1)
+                    with profile("prox"):
+                        if proxg is not None:
+                            proxg(x, alpha)  # x = proxg(x)
 
-            log.info("iter %d", it)
+                    t = (1.0 + (1.0 + 4.0 * t**2)**0.5) / 2.0
+                    self.axpby((1.0 - s) / t, z, (s + t - 1.0) / t, x)
 
-        x_k.copy_to(x_h)
+                    if disp is not None:
+                        disp(x.to_host())
+
+        x.copy_to(x_h)
+        return x_h
 
     def max(self, val, arr):
         """ Computes elementwise maximum: arr[:] = max(arr, val). """

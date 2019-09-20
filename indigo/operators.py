@@ -26,13 +26,15 @@ class Operator(object):
         """
         M, N = self.shape if forward else tuple(reversed(self.shape))
         if left: # left-multiply
+            xexp, yexp = x.size, y.size
             x = x.reshape( (N,-1) )
             y = y.reshape( (M,-1) )
-            assert x.shape[1] == y.shape[1], "Dimension mismatch"
+            xact, yact = x.size, y.size
+            assert x.shape[1] == y.shape[1], "Dimension mismatch: expected %d, got %d" % (x.shape[1], y.shape[1])
         else: # right-multiply
             x = x.reshape( (-1,M) )
             y = y.reshape( (-1,N) )
-            assert x.shape[0] == y.shape[0], "Dimension mismatch"
+            assert x.shape[0] == y.shape[0], "Dimension mismatch: expected %d, got %d" % (x.shape[0], y.shape[0])
         self._eval(y, x, alpha=alpha, beta=beta, forward=forward, left=left)
 
     @property
@@ -112,6 +114,15 @@ class Operator(object):
         """ True if this operator or any of its children are of the given type(s). """
         from indigo.analyses import TreeHasOp
         return TreeHasOp(op_classes).search(self)
+
+    def save(self, fname):
+        from pickle import dump
+        dump(self, fname)
+
+    @staticmethod
+    def load(fname):
+        from pickle import load
+        return load(fname)
 
 
 class CompositeOperator(Operator):
@@ -197,6 +208,7 @@ class SpMatrix(Operator):
         """
         super().__init__(backend, **kwargs)
         assert isinstance(M, spp.spmatrix)
+
         self._matrix = M
         self._matrix_d = None
 
@@ -434,6 +446,7 @@ class VStack(CompositeOperator):
         for C in self._children:
             h = C.shape[0]
             slc = slice( h_offset, h_offset+h )
+            y_slc = y[slc,:]
             C.eval( y[slc,:], x, alpha=alpha, beta=beta, forward=True, left=left)
             h_offset += h
 
